@@ -1,7 +1,10 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <string.h>
+#include <errno.h>
+
 #include "trace_buffer.h"
 
 #define NSTEPS (100)
@@ -64,30 +67,55 @@ do_some_work(void *argdata)
 	int tid 			= ((struct ArgData *) argdata)->tid;
 	int hash 			= 0;
 
-	char buffer[256];
-
-	sprintf(buffer, "BEFORE LOOP ---> ID: %d", tid);
-	TraceBufferAddEntry(tbuff, strdup(buffer), true);
+	TraceBufferAddEntryFmt(tbuff, "BEFORE LOOP ---> ID: %d", tid);
 
 	for (int i = 0; i < nloops; i ++)
 	{
-		sprintf(buffer, "BEFORE ---> ID: %d >>>> %d step", tid, i + 1);
-		TraceBufferAddEntry(tbuff, strdup(buffer), true);
+		TraceBufferAddEntryFmt(tbuff, "BEFORE ---> ID: %d >>>> %d step", tid, i + 1);
 
 		for (int j = 0; j < nsteps; j++)
 			hash ^= hash_uint32(i * j);
 
-		sprintf(buffer, "AFTER ---> ID: %d >>>> %d step", tid, i + 1);
-		TraceBufferAddEntry(tbuff, strdup(buffer), true);
+		TraceBufferAddEntryFmt(tbuff, "AFTER ---> ID: %d >>>> %d step", tid, i + 1);
 	}
 
-	sprintf(buffer, "AFTER LOOP ---> ID: %d >>>> %x hash", tid, hash);
-	TraceBufferAddEntry(tbuff, strdup(buffer), true);
+	TraceBufferAddEntryFmt(tbuff, "AFTER LOOP ---> ID: %d >>>> %x hash", tid, hash);
 
 	return NULL;
 }
 
+int count;
+
+void *
+do_some_work1(void *argdata)
+{
+	TraceBuffer tbuff 	= ((struct ArgData *) argdata)->tbuff;
+	int nloops 			= ((struct ArgData *) argdata)->nloops;
+	int nsteps 			= ((struct ArgData *) argdata)->nsteps;
+	int tid 			= ((struct ArgData *) argdata)->tid;
+
+	TraceBufferAddEntryFmt(tbuff, "BEFORE LOOP ---> ID: %d", tid);
+
+	for (int i = 0; i < nloops; i ++)
+	{
+		for (int j = 0; j < nsteps; j++)
+		{
+			TraceBufferAddEntry(tbuff, "AFTER ---> ID", false);
+			count++;
+			TraceBufferAddEntry(tbuff, "BEFORE ---> ID", false);
+		}
+	}
+
+	TraceBufferAddEntryFmt(tbuff, "AFTER LOOP ---> ID: %d", tid);
+
+	return NULL;
+}
+
+
 #define TRACE_BUFFER_SIZE (10000)
+
+#define handle_error_en(en, msg) \
+        do { errno = en; perror(msg); exit(EXIT_FAILURE); } while (0)
 
 
 int main(int argc, char **argv)
@@ -97,11 +125,14 @@ int main(int argc, char **argv)
 	struct ArgData *arg;
 	pthread_t *threads;
 	pthread_attr_t attr;
+	cpu_set_t cpuset;
 	int rc;
 	void *status;
 
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+
+	CPU_ZERO(&cpuset);
 
 	if (argc != 4)
 	{
@@ -124,13 +155,19 @@ int main(int argc, char **argv)
 		arg[i].tbuff 	= buff;
 		arg[i].tid		= i + 1;
 
-		rc = pthread_create(&threads[i], &attr, do_some_work, (void *) &arg[i]);
+		CPU_SET(i, &cpuset);
+
+		rc = pthread_create(&threads[i], &attr, do_some_work1, (void *) &arg[i]);
 
 		if (rc)
 		{
-			printf("ERROR; return code from pthread_create() is %d\n", rc);
+			fprintf(stderr, "ERROR; return code from pthread_create() is %d\n", rc);
 			return EXIT_FAILURE;
 		}
+
+		rc = pthread_setaffinity_np(threads[i], sizeof(cpu_set_t), &cpuset);
+		if (rc != 0)
+		    handle_error_en(rc, "pthread_setaffinity_np");
 	}
 
 	pthread_attr_destroy(&attr);
@@ -141,11 +178,12 @@ int main(int argc, char **argv)
 
 		if (rc)
 		{
-			printf("ERROR; return code from pthread_join() is %d\n", rc);
+			fprintf(stderr, "ERROR; return code from pthread_join() is %d\n", rc);
 			return EXIT_FAILURE;
 		}
 	}
 
+	printf("%s\n\n------------------------------------------------------------\n", TraceBufferToString(buff, "\n"));
 	TraceBufferSortByTime(buff);
 	printf("%s\n", TraceBufferToString(buff, "\n"));
 

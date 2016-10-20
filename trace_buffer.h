@@ -20,5 +20,6 @@ extern void TraceBufferSortByTime(TraceBuffer tbuff);
 extern char *TraceBufferToString(TraceBuffer tbuff, const char *sep);
 
 extern void TraceBufferAddEntry(TraceBuffer tbuff, char *msg, bool shouldFree);
+extern void TraceBufferAddEntryFmt(TraceBuffer t_buff, const char *fmt, ...);
 
 #endif

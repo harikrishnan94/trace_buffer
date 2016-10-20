@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -O2 -pthread
+CFLAGS = -O3 -pthread
 LDFLAGS = -pthread
 
 LIB_NAME = libtrace_buffer.so

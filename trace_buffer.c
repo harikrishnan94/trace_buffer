@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <time.h>
 
 #include <assert.h>
@@ -11,6 +12,7 @@
 
 #define MAX_TRACE_BUFFER_SIZE 		(2 * 1000 * 1000 * 1000)
 #define DEFAULT_TRACE_BUFFER_SIZE 	(10000)
+#define MAX_MSG_SIZE 				(1024)
 
 #ifndef Assert
 #define Assert(cond) assert(cond)
@@ -134,22 +136,64 @@ TraceBufferDestroy(TraceBuffer t_buff)
 void
 TraceBufferAddEntry(TraceBuffer t_buff, char *msg, bool shouldFree)
 {
+	struct timespec tspec;
 	TraceBufferElement *element;
-	TraceBufferImpl *tbuff 	= t_buff;
-	int size 				= tbuff->traceBufferSize;
-	int next 				= __sync_fetch_and_add(&tbuff->nextElement, 1) % size;
+	TraceBufferImpl *tbuff;
+	int size;
+	int next;
+
+	tbuff 	= t_buff;
+	next 	= __sync_fetch_and_add(&tbuff->nextElement, 1);
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &tspec);
 
 	Assert(msg != NULL);
 
+	size 	= tbuff->traceBufferSize;
+	next 	= next % size;
 	element = &tbuff->elements[next];
 
 	element->threadId 		= pthread_self();
 	element->msg 			= msg;
 	element->shouldFreeMsg 	= shouldFree;
 	tbuff->sorted			= false;
-
-	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &element->timestamp);
+	element->timestamp 		= tspec;
 }
+
+void
+TraceBufferAddEntryFmt(TraceBuffer t_buff, const char *fmt, ...)
+{
+	struct timespec tspec;
+	TraceBufferElement *element;
+	TraceBufferImpl *tbuff;
+	int size;
+	int next;
+	char *buffer;
+	va_list vargs;
+
+	tbuff 	= t_buff;
+	next 	= __sync_fetch_and_add(&tbuff->nextElement, 1);
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &tspec);
+
+	Assert(fmt != NULL);
+
+	size 	= tbuff->traceBufferSize;
+	next 	= next % size;
+	buffer 	= alloca(MAX_MSG_SIZE * sizeof(char));
+
+	va_start(vargs, fmt);
+	vsprintf(buffer, fmt, vargs);
+	va_end(vargs);
+
+	buffer 	= strcpy(palloc0(sizeof(*buffer) * (strlen(buffer) + 1)), buffer);
+	element = &tbuff->elements[next];
+
+	element->threadId 		= pthread_self();
+	element->msg 			= buffer;
+	element->shouldFreeMsg 	= true;
+	tbuff->sorted			= false;
+	element->timestamp 		= tspec;
+}
+
 
 
 void
@@ -162,13 +206,19 @@ TraceBufferSortByTime(TraceBuffer t_buff)
 	if (tbuff->sorted)
 		return;
 
+	if (tbuff->traceBufferStr)
+	{
+		pfree(tbuff->traceBufferStr);
+		tbuff->traceBufferStr = NULL;
+	}
+
 	qsort(elements, size, sizeof(*elements), tracebuffer_timestamp_compare);
 	tbuff->sorted = true;
 }
 
 
-#define TIMESTAMP_STR_LEN 	(11 * 3)
-#define THREAD_ID_STR_LEN 	(11)
+#define TIMESTAMP_STR_LEN 	(20)
+#define THREAD_ID_STR_LEN 	(16)
 
 char *
 TraceBufferToString(TraceBuffer t_buff, const char *sep)
@@ -186,7 +236,7 @@ TraceBufferToString(TraceBuffer t_buff, const char *sep)
 
 	for (int i = 0; i < size; i++)
 		if (elements[i].msg)
-			traceBufferStrLen += strlen(elements[i].msg) + TIMESTAMP_STR_LEN + THREAD_ID_STR_LEN + 3 + sepLen;
+			traceBufferStrLen += strlen(elements[i].msg) + TIMESTAMP_STR_LEN + THREAD_ID_STR_LEN + sepLen;
 
 	traceBufferStr 			= palloc(traceBufferStrLen + sizeof(char));
 	tbuff->traceBufferStr 	= traceBufferStr;
@@ -195,8 +245,10 @@ TraceBufferToString(TraceBuffer t_buff, const char *sep)
 	{
 		if (elements[i].msg)
 		{
-			sprintf(&traceBufferStr[runningLen], "0x%8.8lx| 0x%8.8lx-0x%8.8lx| %s%s", elements[i].threadId,
-					elements[i].timestamp.tv_sec, elements[i].timestamp.tv_nsec, elements[i].msg, sep);
+			unsigned long long nsecs = elements[i].timestamp.tv_sec * 1000000000 + elements[i].timestamp.tv_nsec;
+
+			sprintf(&traceBufferStr[runningLen], "0x%8.8lx| %18llu| %s%s", elements[i].threadId,
+					nsecs, elements[i].msg, sep);
 
 			while (traceBufferStr[runningLen])
 				runningLen++;
